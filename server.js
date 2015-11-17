@@ -4,13 +4,7 @@ var https = require('https');
 var querystring = require('querystring');
 var fs = require('fs');
 var WebSocketServer = require('ws').Server;
-
-var options = {
-    key: fs.readFileSync('key.pem').toString(),
-    cert: fs.readFileSync('cert.pem').toString(),
-    ciphers: ["ECDHE-RSA-AES256-SHA384","DHE-RSA-AES256-SHA384","ECDHE-RSA-AES256-SHA256","DHE-RSA-AES256-SHA256","ECDHE-RSA-AES128-SHA256","DHE-RSA-AES128-SHA256","HIGH","!aNULL","!eNULL","!EXPORT","!DES","!RC4","!MD5","!PSK","!SRP","!CAMELLIA"].join(':'),
-    honorCipherOrder: true
-};
+var API_Key = 'AIzaSyBbf3cs6Nw483po40jw7hZLejmdrgwozWc';
 
 var server = http.createServer(function (request, response) {
     response.writeHead(200);
@@ -44,7 +38,6 @@ wss.on('connection', function(client) {
                 client.close();
             } else {
                 console.log('Get video clip done');
-                console.log(entity);
                 if (peak_counter[0] <= entity.data.peak) {
                     peak_counter[0] = entity.data.peak;
                     peak_counter[1] = false;
@@ -82,41 +75,53 @@ function count_viewer(client, clip_id) {
     }));
 
     client.on('close', function() {
+        console.log('One viewer closed from '+clip_id);
         linkedClients.remove(clientNode);
         if (linkedClients.length === 0) {
             delete video_clips[clip_id];
             if (!peak_counter[1]) return;
-
+            
+            console.log('Updating peak for video clip '+clip_id);
             var peak_value = peak_counter[0];
-            var entity = {
-                key: dataset.key(['VideoClip', clip_id]),
-                method: 'update',
-                data: {
-                    peak: peak_value,
-                    /*{
-                        name: 'peak',
-                        value: peak_value,
-                        excludeFromIndexes: true
-                    }*/
+            var data = querystring.stringify({
+                API_Key: API_Key,
+                peak: peak_value,
+            });
+            var options = {
+                hostname: 'dan-tube.appspot.com',
+                path: '/video/update_peak/'+clip_id,
+                method: 'POST',
+                accept: '*/*',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': Buffer.byteLength(data)
                 }
             }
-            dataset.save(entity, function(err) {
-                if (err) {
-                    console.log('Update peak error for video clip '+clip_id+':');
-                    console.log(err);
-                } else {
-                    console.log('Peak has been updated for video clip '+clip_id);
-                    if (!(clip_id in video_clips)) {
-                        delete peaks[clip_id];
+            var req = https.request(options, function(res) {
+                res.setEncoding('utf8');
+                res.on('data', function(data) {
+                    data = JSON.parse(data);
+                    if (data.error) {
+                        console.log('Update peak error for video clip '+clip_id+': '+data.message);
                     } else {
-                        if (peak_counter[0] === peak_value) {
-                            peak_counter[1] = false;
+                        if ((!clip_id in video_clips)) {
+                            delete peaks[clip_id];
+                        } else {
+                            if (peak_counter[0] === peak_value) {
+                                peak_counter[1] = false;
+                            }
                         }
                     }
-                }
+                });
+            });
+            req.write(data);
+            req.end();
+
+            req.on('error', function(err){
+                console.log('HTTPS post error for video clip '+clip_id+':');
+                console.log(err);
             });
         }
-        console.log('One viewer closed from '+clip_id);
     });
 }
 

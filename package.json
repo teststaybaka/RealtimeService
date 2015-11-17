@@ -3,6 +3,8 @@
     "start": "sudo nodejs server.js 2>&1 >> nodejs.log"
   },
   "dependencies": {
-    "ws": "~0.8.0"
+    "ws": "~0.8.0",
+    "googleapis": "2.1.6",
+    "gcloud": "0.24.0"
   }
 }
