@@ -79,7 +79,10 @@ function count_viewer(client, clip_id) {
         linkedClients.remove(clientNode);
         if (linkedClients.length === 0) {
             delete video_clips[clip_id];
-            if (!peak_counter[1]) return;
+            if (!peak_counter[1]) {
+                delete peaks[clip_id];
+                return;
+            }
             
             console.log('Updating peak for video clip '+clip_id);
             var peak_value = peak_counter[0];
@@ -104,7 +107,7 @@ function count_viewer(client, clip_id) {
                     if (data.error) {
                         console.log('Update peak error for video clip '+clip_id+': '+data.message);
                     } else {
-                        if ((!clip_id in video_clips)) {
+                        if (!(clip_id in video_clips)) {
                             delete peaks[clip_id];
                         } else {
                             if (peak_counter[0] === peak_value) {
