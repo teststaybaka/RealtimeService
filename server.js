@@ -29,7 +29,7 @@ wss.on('connection', function(client) {
 
     var clip_id = parseInt(res[1]);
     if (!(clip_id in peaks)) {
-        var peak_counter = [0, false];
+        var peak_counter = [0, 0];
         peaks[clip_id] = peak_counter;
         var key = dataset.key(['VideoClip', clip_id]);
         dataset.get(key, function(err, entity) {
@@ -40,7 +40,7 @@ wss.on('connection', function(client) {
                 console.log('Get video clip done');
                 if (peak_counter[0] <= entity.data.peak) {
                     peak_counter[0] = entity.data.peak;
-                    peak_counter[1] = false;
+                    peak_counter[1] = 0;
                 }
                 count_viewer(client, clip_id);
             }
@@ -64,7 +64,7 @@ function count_viewer(client, clip_id) {
     linkedClients.push(clientNode);
     if (peak_counter[0] < linkedClients.length) {
         peak_counter[0] = linkedClients.length;
-        peak_counter[1] = true;
+        peak_counter[1] |= 1;
     }
 
     console.log('Websocket connected: '+clip_id+' currently has '+linkedClients.length+' viewers.');
@@ -79,71 +79,85 @@ function count_viewer(client, clip_id) {
         linkedClients.remove(clientNode);
         if (linkedClients.length === 0) {
             delete video_clips[clip_id];
-            if (!peak_counter[1]) {
-                delete peaks[clip_id];
-                return;
-            }
-            
-            console.log('Updating peak for video clip '+clip_id);
-            var peak_value = peak_counter[0];
-            var data = querystring.stringify({
-                API_Key: API_Key,
-                peak: peak_value,
-            });
-            var options = {
-                hostname: 'dan-tube.appspot.com',
-                path: '/video/update_peak/'+clip_id,
-                method: 'POST',
-                accept: '*/*',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Content-Length': Buffer.byteLength(data)
-                }
-            }
-            var req = https.request(options, function(res) {
-                res.setEncoding('utf8');
-                res.on('data', function(data) {
-                    data = JSON.parse(data);
-                    if (data.error) {
-                        console.log('Update peak error for video clip '+clip_id+': '+data.message);
-                    } else {
-                        if (!(clip_id in video_clips)) {
-                            delete peaks[clip_id];
-                        } else {
-                            if (peak_counter[0] === peak_value) {
-                                peak_counter[1] = false;
-                            }
-                        }
-                    }
-                });
-            });
-            req.write(data);
-            req.end();
-
-            req.on('error', function(err){
-                console.log('HTTPS post error for video clip '+clip_id+':');
-                console.log(err);
-            });
+            flush_peak(clip_id, peak_counter);    
         }
     });
 }
 
-(function broadcast_viewers() {
+function flush_peak(clip_id, peak_counter) {
+    if ((peak_counter[1] & 1) === 0) {
+        delete peaks[clip_id];
+        return;
+    }
+    if ((peak_counter[1] & 2) === 2) {
+        console.log('Peak value is updating');
+        return;
+    }
+
+    console.log('Updating peak for video clip '+clip_id+':'+peak_counter[0]+' '+peak_counter[1]);
+    peak_counter[1] |= 2;
+    var peak_value = peak_counter[0];
+    var data = querystring.stringify({
+        API_Key: API_Key,
+        peak: peak_value,
+    });
+    var options = {
+        hostname: 'dan-tube.appspot.com',
+        path: '/video/update_peak/'+clip_id,
+        method: 'POST',
+        accept: '*/*',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(data)
+        }
+    }
+    var req = https.request(options, function(res) {
+        res.setEncoding('utf8');
+        res.on('data', function(data) {
+            data = JSON.parse(data);
+            if (data.error) {
+                console.log('Update peak error for video clip '+clip_id+': '+data.message);
+                peak_counter[1] &= 1;
+            } else {
+                if (peak_counter[0] > peak_value) {
+                    peak_counter[1] &= 1;
+                    flush_peak(clip_id, peak_counter);
+                } else if (!(clip_id in video_clips)) {
+                    delete peaks[clip_id];
+                } else {
+                    peak_counter[1] = 0;
+                }
+            }
+        });
+    });
+    req.write(data);
+    req.end();
+
+    req.on('error', function(err){
+        console.log('HTTPS post error for video clip '+clip_id+':');
+        console.log(err);
+        peak_counter[1] &= 1;
+    });
+}
+
+(function broadcast_all_videos() {
     console.log('Broadcasting current viewers');
     for (var clip_id in video_clips) {
         var linkedClients = video_clips[clip_id];
-        var peak_counter = peaks[clip_id];
-        var iterator = new LinkedListIterator(linkedClients);
-        while (iterator.hasNext()) {
-            var node = iterator.next();
-            node.client.send(JSON.stringify({
-                type: 'viewers',
-                current: linkedClients.length,
-                peak: peak_counter[0]
-            }));
-        }
+        process.nextTick(function() {
+            var peak_counter = peaks[clip_id];
+            var iterator = new LinkedListIterator(linkedClients);
+            while (iterator.hasNext()) {
+                var node = iterator.next();
+                node.client.send(JSON.stringify({
+                    type: 'viewers',
+                    current: linkedClients.length,
+                    peak: peak_counter[0]
+                }));
+            }
+        });
     }
-    setTimeout(broadcast_viewers, 60000);
+    setTimeout(broadcast_all_videos, 60000);
 })();
 
 function ClientNode(client) {

@@ -5,6 +5,7 @@
   "dependencies": {
     "ws": "~0.8.0",
     "googleapis": "2.1.6",
-    "gcloud": "0.24.0"
+    "gcloud": "0.24.0",
+    "cookie-parser": "1.4.0"
   }
 }
