@@ -10,14 +10,44 @@ var cookie_name = 'db_session';
 var secret_key = 'Mfrghtrrouhsmvnmxdiosjkgjfds68_=iooijgrdxuihbvc97yutcivbhugd409k';
 var API_Key = 'AIzaSyBbf3cs6Nw483po40jw7hZLejmdrgwozWc';
 
+var api_req = /^\/(\d+)\?entry=(.*)$/;
 var server = http.createServer(function (request, response) {
-    response.writeHead(200);
-    response.end("Please connect with websocket.\n");
+    var res = request.url.match(api_req);
+    if (res) {
+        try {
+            var clip_id = parseInt(res[1]);
+            var parts = decodeURIComponent(res[2]).split('|');
+            if (parts.length !== 2) {
+                throw 'Invalid params';
+            }
+
+            var signature = crypto.createHmac(algorithm, secret_key)
+                                    .update(parts[0])
+                                    .digest('hex');
+            if (parts[1] !== signature) {
+                throw 'Invalid signature';
+            }
+
+            response.writeHead(200);
+            response.end("Danmaku received.\n");
+
+            var danmaku = JSON.parse(new Buffer(parts[0], 'base64').toString('utf8'));
+            broadcast_danmaku(clip_id, danmaku);
+        } catch (err) {
+            console.log(err);
+            response.writeHead(200);
+            response.end("Please connect with websocket.\n");
+        }
+    } else {
+        response.writeHead(200);
+        response.end("Please connect with websocket.\n");
+    }
 }).listen(80);
 
 var video_clips = {};
 var peaks = {};
 var view_timestamps = {};
+var broadcast_viewers_set = {};
 var dataset = gcloud.datastore.dataset({
     projectId: 'dan-tube',
     keyFilename: './DanTube-88b03a33107c.json',
@@ -36,6 +66,11 @@ wss.on('connection', function(client) {
     var clip_id = parseInt(res[2]);
     var clip_index = parseInt(res[4]);
     var parts = decodeURIComponent(res[3]).split('|');
+    if (parts.length !== 3) {
+        client.close();
+        return;
+    }
+
     var signature = crypto.createHmac(algorithm, secret_key)
                             .update(cookie_name+'|'+parts[0]+'|'+parts[1])
                             .digest('hex');
@@ -59,10 +94,10 @@ wss.on('connection', function(client) {
                     var peak_counter = peaks[clip_id];
                     if (peak_counter[0] <= entity.data.peak) {
                         peak_counter[0] = entity.data.peak;
-                        peak_counter[1] &= 0;
+                        peak_counter[1] = 0;
                     }
                 } else {
-                    peaks[clip_id] = [entity.data.peak, 0];
+                    peaks[clip_id] = [entity.data.peak, 0, 0];
                 }
                 count_viewers(client, clip_id);
             }
@@ -80,11 +115,10 @@ wss.on('connection', function(client) {
                 if (err || !entity) {
                     console.log('Get view record error.');
                 } else {
-                    if (viewrecord_key in view_timestamps) {
-                        timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id);
-                    } else {
-                        view_timestamps[viewrecord_key] = [entity.data.clip_index, entity.data.timestamp, 0, 0];
+                    if (!(viewrecord_key in view_timestamps)) {
+                        view_timestamps[viewrecord_key] = [entity.data.clip_index, entity.data.timestamp, 0, 0, 0];
                     }
+                    timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id);
                 }
             });
         }
@@ -108,10 +142,10 @@ function count_viewers(client, clip_id) {
     linkedClients.push(clientNode);
     if (peak_counter[0] < linkedClients.length) {
         peak_counter[0] = linkedClients.length;
-        peak_counter[1] |= 1;
+        peak_counter[1] = 1;
     }
 
-    console.log('Websocket connected: '+clip_id+' currently has '+linkedClients.length+' viewers.');
+    // console.log('Websocket connected: '+clip_id+' currently has '+linkedClients.length+' viewers.');
     client.send(JSON.stringify({
         type: 'viewers',
         current: linkedClients.length,
@@ -119,7 +153,6 @@ function count_viewers(client, clip_id) {
     }));
     
     client.on('close', function() {
-        console.log('One viewer closed from '+clip_id);
         linkedClients.remove(clientNode);
         if (linkedClients.length === 0) {
             delete video_clips[clip_id];
@@ -129,17 +162,18 @@ function count_viewers(client, clip_id) {
 }
 
 function flush_peak(clip_id, peak_counter) {
-    if ((peak_counter[1] & 1) === 0) {
+    if (peak_counter[1] === 0) {
         delete peaks[clip_id];
         return;
     }
-    if ((peak_counter[1] & 2) === 2) {
+    if (peak_counter[2] === 1) {
         console.log('Peak value is updating');
         return;
     }
 
     console.log('Updating peak for video clip '+clip_id+':'+peak_counter[0]+' '+peak_counter[1]);
-    peak_counter[1] = 2;
+    peak_counter[1] = 0;
+    peak_counter[2] = 1;
     var data = querystring.stringify({
         API_Key: API_Key,
         peak: peak_counter[0],
@@ -158,18 +192,18 @@ function flush_peak(clip_id, peak_counter) {
         res.setEncoding('utf8');
         res.on('data', function(data) {
             data = JSON.parse(data);
-            peak_counter[1] &= 1;
+            peak_counter[2] = 0;
             if (data.error) {
                 console.log('Update peak error for video clip '+clip_id+': '+data.message);
             } else {
                 if (!(clip_id in video_clips)) {
-                    if ((peak_counter[1] & 1) === 1) {
+                    if (peak_counter[1] === 1) {
                         flush_peak(clip_id, peak_counter);
                     } else {
                         delete peaks[clip_id];
                     }
                 }
-     i       }
+            }
         });
     });
     req.write(data);
@@ -178,13 +212,13 @@ function flush_peak(clip_id, peak_counter) {
     req.on('error', function(err){
         console.log('HTTPS post error for video clip '+clip_id+':');
         console.log(err);
-        peak_counter[1] &= 1;
+        peak_counter[2] = 0;
     });
 }
 
 function timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id) {
     var timestamp_state = view_timestamps[viewrecord_key];
-    timestamp_state[3] += 1;
+    timestamp_state[2] += 1;
     if (timestamp_state[0] !== clip_index) {
         timestamp_state[0] = clip_index;
         timestamp_state[1] = 0;
@@ -192,7 +226,7 @@ function timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id) {
 
     client.send(JSON.stringify({
         type: 'timestamp',
-        timestamp: timestamp_state[0]
+        timestamp: timestamp_state[1]
     }));
 
     client.on('message', function(timestamp) {
@@ -200,33 +234,33 @@ function timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id) {
         if (isNaN(timestamp)) return;
 
         timestamp_state[1] = timestamp;
-        timestamp_state[2] |= 1;
+        timestamp_state[3] = 1;
     });
 
     client.on('close', function() {
-        timestamp_state[3] -= 1;
-        if (timestamp_state[3] === 0) {
+        timestamp_state[2] -= 1;
+        if (timestamp_state[2] === 0) {
             update_view_history(clip_id, user_id, viewrecord_key, timestamp_state);
         }
     });
 }
 
-function update_view_history(clip_id, user_id, timestamp_key, timestamp_state) {
-    if ((timestamp_state[2] & 1) === 0) {
-        delete view_timestamps[timestamp_key];
+function update_view_history(clip_id, user_id, viewrecord_key, timestamp_state) {
+    if (timestamp_state[3] === 0) {
+        delete view_timestamps[viewrecord_key];
         return;
     }
-    if ((timestamp_state[2] & 2) === 2) {
+    if (timestamp_state[4] === 1) {
         console.log('Timestamp value is updating');
         return;
     }
 
-    console.log('Updating view history');
-    timestamp_state[1] = 2;
+    timestamp_state[3] = 0;
+    timestamp_state[4] = 1;
     var data = querystring.stringify({
         API_Key: API_Key,
         user_id: user_id,
-        timestamp: timestamp_state[0]
+        timestamp: timestamp_state[1]
     });
     var options = {
         hostname: 'dan-tube.appspot.com',
@@ -242,16 +276,15 @@ function update_view_history(clip_id, user_id, timestamp_key, timestamp_state) {
         res.setEncoding('utf8');
         res.on('data', function(data) {
             data = JSON.parse(data);
-            timestamp_state[1] &= 1;
+            timestamp_state[4] = 0;
             if (data.error) {
                 console.log('Update view history error for video clip '+clip_id+': '+data.message);
             } else {
                 if (timestamp_state[2] === 0) {
-                    if ((timestamp_state[1] & 1) === 1) {
-                        update_view_history(clip_id, user_id, timestamp_key, timestamp_state);
+                    if (timestamp_state[3] === 1) {
+                        update_view_history(clip_id, user_id, viewrecord_key, timestamp_state);
                     } else {
-                        console.log('update view history done');
-                        delete view_timestamps[timestamp_key];
+                        delete view_timestamps[viewrecord_key];
                     }
                 }
             }
@@ -263,16 +296,17 @@ function update_view_history(clip_id, user_id, timestamp_key, timestamp_state) {
     req.on('error', function(err){
         console.log('HTTPS post error for video clip '+clip_id+':');
         console.log(err);
-        timestamp_state[1] &= 1;
+        timestamp_state[4] = 0;
     });
 }
 
-function broadcast_danmaku(clip_id, content) {
+function broadcast_danmaku(clip_id, danmaku) {
+    console.log('Broadcasting danmaku');
     var linkedClients = video_clips[clip_id];
     var iterator = new LinkedListIterator(linkedClients);
     var message = JSON.stringify({
                                     type: 'danmaku',
-                                    content: content
+                                    entry: danmaku
                                 });
     while (iterator.hasNext()) {
         var node = iterator.next();
