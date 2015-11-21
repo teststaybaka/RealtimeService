@@ -10,49 +10,20 @@ var cookie_name = 'db_session';
 var secret_key = 'Mfrghtrrouhsmvnmxdiosjkgjfds68_=iooijgrdxuihbvc97yutcivbhugd409k';
 var API_Key = 'AIzaSyBbf3cs6Nw483po40jw7hZLejmdrgwozWc';
 
-var api_req = /^\/(\d+)\?entry=(.*)$/;
 var server = http.createServer(function (request, response) {
-    var res = request.url.match(api_req);
-    if (res) {
-        try {
-            var clip_id = parseInt(res[1]);
-            var parts = decodeURIComponent(res[2]).split('|');
-            if (parts.length !== 2) {
-                throw 'Invalid params';
-            }
-
-            var signature = crypto.createHmac(algorithm, secret_key)
-                                    .update(parts[0])
-                                    .digest('hex');
-            if (parts[1] !== signature) {
-                throw 'Invalid signature';
-            }
-
-            response.writeHead(200);
-            response.end("Danmaku received.\n");
-
-            var danmaku = JSON.parse(new Buffer(parts[0], 'base64').toString('utf8'));
-            broadcast_danmaku(clip_id, danmaku);
-        } catch (err) {
-            console.log(err);
-            response.writeHead(200);
-            response.end("Please connect with websocket.\n");
-        }
-    } else {
-        response.writeHead(200);
-        response.end("Please connect with websocket.\n");
-    }
+    response.writeHead(200);
+    response.end("Please connect with websocket.\n");
 }).listen(80);
 
 var video_clips = {};
 var viewers_counter = {};
-var view_timestamps = {};
+var Danmaku_Positions = {Scroll: 1, Top: 1, Bottom: 1};
 var dataset = gcloud.datastore.dataset({
     projectId: 'dan-tube',
     keyFilename: './DanTube-88b03a33107c.json',
 });
 
-var url_req = /^\/(dt\d+)\/(\d+)\?session=(.*)&index=(\d+)$/;
+var url_req = /^\/(\d+)\?session=(.*)$/;
 var wss = new WebSocketServer({server: server});
 wss.on('connection', function(client) {
     var res = client.upgradeReq.url.match(url_req);
@@ -61,10 +32,8 @@ wss.on('connection', function(client) {
         return;
     }
     
-    var video_id = res[1];
-    var clip_id = parseInt(res[2]);
-    var clip_index = parseInt(res[4]);
-    var parts = decodeURIComponent(res[3]).split('|');
+    var clip_id = parseInt(res[1]);
+    var parts = decodeURIComponent(res[2]).split('|');
     if (parts.length !== 3) {
         client.close();
         return;
@@ -104,23 +73,44 @@ wss.on('connection', function(client) {
     }
 
     if (session.user) {
-        var user_id = session.user.user_id;
-        var viewrecord_key = video_id+'v:'+user_id;
-        if (viewrecord_key in view_timestamps) {
-            timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id);
-        } else {
-            var key = dataset.key(['ViewRecord', viewrecord_key]);
-            dataset.get(key, function(err, entity) {
-                if (err || !entity) {
-                    console.log('Get view record error.');
-                } else {
-                    if (!(viewrecord_key in view_timestamps)) {
-                        view_timestamps[viewrecord_key] = [entity.data.clip_index, entity.data.timestamp, 0, 0, 0];
-                    }
-                    timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id);
-                }
-            });
-        }
+        client.on('message', function(data) {
+            data = querystring.parse(data);
+            var user_id = session.user.user_id;
+            var timestamp = parseFloat(data.timestamp);
+            var size = parseInt(data.size);
+            var color = parseInt(data.color, 16);
+            if (isNaN(timestamp) || isNaN(size) || isNaN(color)) return;
+
+            var position = data.type;
+            if (!(position in Danmaku_Positions)) return;
+
+            var content = data.content.trim();
+            if (content.length === 0 || content.length > 350) return;
+
+            var created = new Date();
+            var year = created.getFullYear();
+            var month = ('0' + (created.getMonth() + 1)).substr(-2);
+            var date = ('0' + created.getDate()).substr(-2);
+            var hours = ('0' + created.getHours()).substr(-2);
+            var minutes = ('0' + created.getMinutes()).substr(-2);
+            if (data.reply_to) {
+                content = '←' + content;
+            }
+            
+            var danmaku = {
+                content: content,
+                timestamp: timestamp,
+                created: month+'-'+date+' '+hours+':'+minutes,
+                created_year: year+'-'+month+'-'+date+' '+hours+':'+minutes,
+                created_seconds: created.getTime()/1000,
+                creator: user_id,
+                type: position,
+                size: size,
+                color: color,
+                // 'index': index,
+            }
+            broadcast_danmaku(clip_id, danmaku);
+        });
     }
 });
 wss.on('error', function(evt) {
@@ -216,90 +206,6 @@ function flush_peak(clip_id, viewer_counter) {
         console.log('HTTPS post error for video clip '+clip_id+':');
         console.log(err);
         viewer_counter[2] = 0;
-    });
-}
-
-function timestamp_timer(client, viewrecord_key, clip_id, clip_index, user_id) {
-    var timestamp_state = view_timestamps[viewrecord_key];
-    timestamp_state[2] += 1;
-    if (timestamp_state[0] !== clip_index) {
-        timestamp_state[0] = clip_index;
-        timestamp_state[1] = 0;
-    }
-
-    client.send(JSON.stringify({
-        type: 'timestamp',
-        timestamp: timestamp_state[1]
-    }));
-
-    client.on('message', function(timestamp) {
-        timestamp = parseFloat(timestamp);
-        if (isNaN(timestamp)) return;
-
-        timestamp_state[1] = timestamp;
-        timestamp_state[3] = 1;
-    });
-
-    client.on('close', function() {
-        timestamp_state[2] -= 1;
-        if (timestamp_state[2] === 0) {
-            update_view_history(clip_id, user_id, viewrecord_key, timestamp_state);
-        }
-    });
-}
-
-function update_view_history(clip_id, user_id, viewrecord_key, timestamp_state) {
-    if (timestamp_state[3] === 0) {
-        delete view_timestamps[viewrecord_key];
-        return;
-    }
-    if (timestamp_state[4] === 1) {
-        console.log('Timestamp value is updating');
-        return;
-    }
-
-    timestamp_state[3] = 0;
-    timestamp_state[4] = 1;
-    var data = querystring.stringify({
-        API_Key: API_Key,
-        user_id: user_id,
-        timestamp: timestamp_state[1]
-    });
-    var options = {
-        hostname: 'dan-tube.appspot.com',
-        path: '/video/update_history/'+clip_id,
-        method: 'POST',
-        accept: '*/*',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Content-Length': Buffer.byteLength(data)
-        }
-    }
-    var req = https.request(options, function(res) {
-        res.setEncoding('utf8');
-        res.on('data', function(data) {
-            data = JSON.parse(data);
-            timestamp_state[4] = 0;
-            if (data.error) {
-                console.log('Update view history error for video clip '+clip_id+': '+data.message);
-            } else {
-                if (timestamp_state[2] === 0) {
-                    if (timestamp_state[3] === 1) {
-                        update_view_history(clip_id, user_id, viewrecord_key, timestamp_state);
-                    } else {
-                        delete view_timestamps[viewrecord_key];
-                    }
-                }
-            }
-        });
-    });
-    req.write(data);
-    req.end();
-
-    req.on('error', function(err){
-        console.log('HTTPS post error for video clip '+clip_id+':');
-        console.log(err);
-        timestamp_state[4] = 0;
     });
 }
 
