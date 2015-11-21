@@ -1,7 +1,7 @@
 {
   "scripts": {
-    "start": "sudo nodejs server.js 2>&1 >> nodejs.log",
-    "test": "sudo nodejs server.js"
+    "start": "sudo nodejs master.js 2>&1 >> nodejs.log",
+    "test": "sudo nodejs master.js"
   },
   "dependencies": {
     "ws": "~0.8.0",
