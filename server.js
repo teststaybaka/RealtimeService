@@ -78,6 +78,11 @@ wss.on('connection', function(client) {
                 }
             }
         });
+    } else {
+        console.log('existed!')
+        for (var key in viewers_counter) {
+            console.log(key);
+        }
     }
     viewer_counter = viewers_counter[clip_id];
     viewer_counter.viewers += 1;
@@ -99,9 +104,13 @@ wss.on('connection', function(client) {
         linkedClients.remove(clientNode);
         viewer_counter.viewers -= 1;
         viewer_counter.viewers_changed = 1;
-        if (linkedClients.length === 0 && !get_video_clip_error) {
+        if (linkedClients.length === 0) {
             delete video_clips[clip_id];
-            flush_peak(clip_id, viewer_counter);    
+            if (get_video_clip_error) {
+                delete viewers_counter[clip_id];
+            } else {
+                flush_peak(clip_id, viewer_counter);
+            }
         }
     });
 
@@ -184,6 +193,9 @@ function flush_peak(clip_id, viewer_counter) {
             viewer_counter.peak_updating = 0;
             if (data.error) {
                 console.log('Update peak error for video clip '+clip_id+': '+data.message);
+                if (!(clip_id in video_clips)) {
+                    delete viewers_counter[clip_id];
+                }
             } else {
                 if (!(clip_id in video_clips)) {
                     if (viewer_counter.peak_changed === 1) {
