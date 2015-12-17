@@ -60,12 +60,18 @@ wss.on('connection', function(client) {
     linkedClients.push(clientNode);
 
     var viewer_counter;
+    var get_video_clip_error = false;
     if (!(clip_id in viewers_counter)) {
         viewers_counter[clip_id] = new ViewerCounter();
         var key = dataset.key(['VideoClip', clip_id]);
         dataset.get(key, function(err, entity) {
-            if (err || !entity) {
-                console.log('Get video clip error, close websocket connection.');
+            if (err) {
+                console.log('Get video clip error, close websocket connection.', err);
+                get_video_clip_error = true;
+                client.close();
+            } else if (!entity) {
+                console.log('Video clip not found. Close websocket connection.');
+                get_video_clip_error = true;
                 client.close();
             } else {
                 if (viewer_counter.peak <= entity.data.peak) {
@@ -92,17 +98,15 @@ wss.on('connection', function(client) {
         if (error) console.log('Initial send viewers error: ', error);
     });
 
-    function clearAfterClose() {
+    client.on('close', function () {
         linkedClients.remove(clientNode);
         viewer_counter.viewers -= 1;
         viewer_counter.viewers_changed = 1;
-        if (linkedClients.length === 0) {
+        if (linkedClients.length === 0 && !get_video_clip_error) {
             delete video_clips[clip_id];
             flush_peak(clip_id, viewer_counter);    
         }
-        console.log('close event')
-    }
-    client.on('close', clearAfterClose);
+    });
 
     if (session.user) {
         client.on('message', function(data) {
