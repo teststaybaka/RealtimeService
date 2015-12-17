@@ -78,11 +78,6 @@ wss.on('connection', function(client) {
                 }
             }
         });
-    } else {
-        console.log('existed!')
-        for (var key in viewers_counter) {
-            console.log(key);
-        }
     }
     viewer_counter = viewers_counter[clip_id];
     viewer_counter.viewers += 1;
