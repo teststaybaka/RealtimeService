@@ -49,13 +49,10 @@ wss.on('connection', function(client) {
     }
     var session = JSON.parse(new Buffer(parts[0], 'base64').toString('utf8'));
 
-    var linkedClients;
     if (!(clip_id in video_clips)) {
-        linkedClients = new LinkedClients();
-        video_clips[clip_id] = linkedClients;
-    } else {
-        linkedClients = video_clips[clip_id];
+        video_clips[clip_id] = new LinkedClients();
     }
+    var linkedClients = video_clips[clip_id];
     var clientNode = new ClientNode(client);
     linkedClients.push(clientNode);
 
