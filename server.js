@@ -49,28 +49,60 @@ wss.on('connection', function(client) {
     }
     var session = JSON.parse(new Buffer(parts[0], 'base64').toString('utf8'));
 
-    if (clip_id in viewers_counter) {
-        count_viewers(client, clip_id);
+    var linkedClients;
+    if (!(clip_id in video_clips)) {
+        linkedClients = new LinkedClients();
+        video_clips[clip_id] = linkedClients;
     } else {
+        linkedClients = video_clips[clip_id];
+    }
+    var clientNode = new ClientNode(client);
+    linkedClients.push(clientNode);
+
+    var viewer_counter;
+    if (!(clip_id in viewers_counter)) {
+        viewers_counter[clip_id] = new ViewerCounter();
         var key = dataset.key(['VideoClip', clip_id]);
         dataset.get(key, function(err, entity) {
             if (err || !entity) {
                 console.log('Get video clip error, close websocket connection.');
                 client.close();
             } else {
-                if (clip_id in viewers_counter) {
-                    var viewer_counter = viewers_counter[clip_id];
-                    if (viewer_counter[0] <= entity.data.peak) {
-                        viewer_counter[0] = entity.data.peak;
-                        viewer_counter[1] = 0;
-                    }
-                } else {
-                    viewers_counter[clip_id] = [entity.data.peak, 0, 0, 0, 0];
+                if (viewer_counter.peak <= entity.data.peak) {
+                    viewer_counter.peak = entity.data.peak;
+                    viewer_counter.peak_changed = 0;
+                    delayed_broadcast_viewers(linkedClients, viewer_counter);
                 }
-                count_viewers(client, clip_id);
             }
         });
     }
+    viewer_counter = viewers_counter[clip_id];
+    viewer_counter.viewers += 1;
+    viewer_counter.viewers_changed = 1;
+    if (viewer_counter.peak < viewer_counter.viewers) {
+        viewer_counter.peak = viewer_counter.viewers;
+        viewer_counter.peak_changed = 1;
+    }
+
+    client.send(JSON.stringify({
+        type: 'viewers',
+        current: viewer_counter.viewers,
+        peak: viewer_counter.peak,
+    }), function(error) {
+        if (error) console.log('Initial send viewers error: ', error);
+    });
+
+    function clearAfterClose() {
+        linkedClients.remove(clientNode);
+        viewer_counter.viewers -= 1;
+        viewer_counter.viewers_changed = 1;
+        if (linkedClients.length === 0) {
+            delete video_clips[clip_id];
+            flush_peak(clip_id, viewer_counter);    
+        }
+        console.log('close event')
+    }
+    client.on('close', clearAfterClose);
 
     if (session.user) {
         client.on('message', function(data) {
@@ -117,59 +149,22 @@ wss.on('error', function(evt) {
     console.log('Websocket error: '+JSON.stringify(evt));
 });
 
-function count_viewers(client, clip_id) {
-    var viewer_counter = viewers_counter[clip_id];
-    var linkedClients;
-    if (!(clip_id in video_clips)) {
-        linkedClients = new LinkedClients();
-        video_clips[clip_id] = linkedClients;
-    } else {
-        linkedClients = video_clips[clip_id];
-    }
-    var clientNode = new ClientNode(client);
-    linkedClients.push(clientNode);
-
-    viewer_counter[3] += 1;
-    viewer_counter[4] = 1;
-    if (viewer_counter[0] < viewer_counter[3]) {
-        viewer_counter[0] = viewer_counter[3];
-        viewer_counter[1] = 1;
-    }
-
-    // console.log('Websocket connected: '+clip_id+' currently has '+linkedClients.length+' viewers.');
-    client.send(JSON.stringify({
-        type: 'viewers',
-        current: viewer_counter[3],
-        peak: viewer_counter[0]
-    }));
-    
-    client.on('close', function() {
-        linkedClients.remove(clientNode);
-        viewer_counter[3] -= 1;
-        viewer_counter[4] = 1;
-        if (linkedClients.length === 0) {
-            delete video_clips[clip_id];
-            flush_peak(clip_id, viewer_counter);    
-        }
-    });
-}
-
 function flush_peak(clip_id, viewer_counter) {
-    if (viewer_counter[1] === 0) {
-        delete viewers_counter[clip_id];
-        return;
-    }
-    if (viewer_counter[2] === 1) {
+    if (viewer_counter.peak_updating === 1) {
         console.log('Peak value is updating');
         return;
     }
+    if (viewer_counter.peak_changed === 0) {
+        delete viewers_counter[clip_id];
+        return;
+    }
 
-    console.log('Updating peak for video clip '+clip_id+':'+viewer_counter[0]+' '+viewer_counter[1]);
-    viewer_counter[1] = 0;
-    viewer_counter[2] = 1;
+    console.log('Updating peak for video clip '+clip_id+':'+viewer_counter.peak+' '+viewer_counter.peak_changed);
+    viewer_counter.peak_changed = 0;
+    viewer_counter.peak_updating = 1;
     var data = querystring.stringify({
         API_Key: API_Key,
-        peak: viewer_counter[0],
+        peak: viewer_counter.peak,
     });
     var options = {
         hostname: 'dan-tube.appspot.com',
@@ -185,12 +180,12 @@ function flush_peak(clip_id, viewer_counter) {
         res.setEncoding('utf8');
         res.on('data', function(data) {
             data = JSON.parse(data);
-            viewer_counter[2] = 0;
+            viewer_counter.peak_updating = 0;
             if (data.error) {
                 console.log('Update peak error for video clip '+clip_id+': '+data.message);
             } else {
                 if (!(clip_id in video_clips)) {
-                    if (viewer_counter[1] === 1) {
+                    if (viewer_counter.peak_changed === 1) {
                         flush_peak(clip_id, viewer_counter);
                     } else {
                         delete viewers_counter[clip_id];
@@ -199,13 +194,13 @@ function flush_peak(clip_id, viewer_counter) {
             }
         });
     });
-    req.write(data);
-    req.end();
+    req.end(data);
 
     req.on('error', function(err){
         console.log('HTTPS post error for video clip '+clip_id+':');
         console.log(err);
-        viewer_counter[2] = 0;
+        viewer_counter.peak_changed = 1;
+        viewer_counter.peak_updating = 0;
     });
 }
 
@@ -220,7 +215,9 @@ function broadcast_danmaku(clip_id, danmaku) {
 
     while (iterator.hasNext()) {
         var node = iterator.next();
-        node.client.send(message);
+        node.client.send(message, function(error) {
+            if (error) console.log('Broadcast danmaku error once: ', error);
+        });
     }
 }
 
@@ -228,7 +225,7 @@ function broadcast_danmaku(clip_id, danmaku) {
     console.log('Broadcasting viewers');
     for (var clip_id in video_clips) {
         var viewer_counter = viewers_counter[clip_id];
-        if (viewer_counter[4] === 1) {
+        if (viewer_counter.viewers_changed === 1) {
             var linkedClients = video_clips[clip_id];
             delayed_broadcast_viewers(linkedClients, viewer_counter);
         }
@@ -238,19 +235,29 @@ function broadcast_danmaku(clip_id, danmaku) {
 
 function delayed_broadcast_viewers(linkedClients, viewer_counter) {
     process.nextTick(function() {
-        viewer_counter[4] = 0;
+        viewer_counter.viewers_changed = 0;
         var iterator = new LinkedListIterator(linkedClients);
         var message = JSON.stringify({
                                         type: 'viewers',
-                                        current: viewer_counter[3],
-                                        peak: viewer_counter[0]
+                                        current: viewer_counter.viewers,
+                                        peak: viewer_counter.peak,
                                     });
 
         while (iterator.hasNext()) {
             var node = iterator.next();
-            node.client.send(message);
+            node.client.send(message, function(error) {
+                if (error) console.log('Broadcast viewers error once: ', error);
+            });
         }
     });
+}
+
+function ViewerCounter() {
+    this.peak = 0;
+    this.viewers = 0;
+    this.peak_changed = 0;
+    this.viewers_changed = 0;
+    this.peak_updating = 0;
 }
 
 function ClientNode(client) {

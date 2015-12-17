@@ -1838,9 +1838,9 @@ util.text.utf8.decode = function(bytes) {
 util.text.utf16.encode = function(str, output, offset) {
   var out = output;
   if(!out) {
-    out = new Uint8Array(str.length);
+    out = new Uint8Array(str.length * 2);
   }
-  var view = new Uint16Array(out);
+  var view = new Uint16Array(out.buffer);
   offset = offset || 0;
   var j = offset;
   var k = offset;
@@ -1859,7 +1859,7 @@ util.text.utf16.encode = function(str, output, offset) {
  * @return the resulting string.
  */
 util.text.utf16.decode = function(bytes) {
-  return String.fromCharCode.apply(null, new Uint16Array(bytes));
+  return String.fromCharCode.apply(null, new Uint16Array(bytes.buffer));
 };
 
 /**
